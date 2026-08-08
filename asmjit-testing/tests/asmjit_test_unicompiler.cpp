@@ -1094,8 +1094,22 @@ static ASMJIT_NOINLINE void test_rrr_ops(JitContext& ctx) {
   test_rrr_op(ctx, UniOpRRR::kMul, 0xFFFFu, 0x00010001u, 0xFFFFFFFFu);
 
   test_rrr_op(ctx, UniOpRRR::kUDiv, 100000u, 1000u, 100u);
+  test_rrr_op(ctx, UniOpRRR::kUDiv, 0u, 1u, 0u);
+  test_rrr_op(ctx, UniOpRRR::kUDiv, 1u, 1u, 1u);
+  test_rrr_op(ctx, UniOpRRR::kUDiv, 1u, 2u, 0u);
+  test_rrr_op(ctx, UniOpRRR::kUDiv, 0xFFFFFFFFu, 1u, 0xFFFFFFFFu);
+  test_rrr_op(ctx, UniOpRRR::kUDiv, 0xFFFFFFFFu, 0xFFFFFFFFu, 1u);
+  test_rrr_op(ctx, UniOpRRR::kUDiv, 0xFFFFFFFFu, 2u, 0x7FFFFFFFu);
+  test_rrr_op(ctx, UniOpRRR::kUDiv, 0x80000000u, 0xFFFFFFFFu, 0u);
 
   test_rrr_op(ctx, UniOpRRR::kUMod, 1999u, 1000u, 999u);
+  test_rrr_op(ctx, UniOpRRR::kUMod, 0u, 1u, 0u);
+  test_rrr_op(ctx, UniOpRRR::kUMod, 1u, 1u, 0u);
+  test_rrr_op(ctx, UniOpRRR::kUMod, 1u, 2u, 1u);
+  test_rrr_op(ctx, UniOpRRR::kUMod, 0xFFFFFFFFu, 1u, 0u);
+  test_rrr_op(ctx, UniOpRRR::kUMod, 0xFFFFFFFFu, 0xFFFFFFFFu, 0u);
+  test_rrr_op(ctx, UniOpRRR::kUMod, 0xFFFFFFFFu, 2u, 1u);
+  test_rrr_op(ctx, UniOpRRR::kUMod, 0x80000000u, 0xFFFFFFFFu, 0x80000000u);
 
   test_rrr_op(ctx, UniOpRRR::kSMin, uint32_t(1111), uint32_t(0), uint32_t(0));
   test_rrr_op(ctx, UniOpRRR::kSMin, uint32_t(-1111), uint32_t(0), uint32_t(-1111));
@@ -1181,6 +1195,110 @@ static ASMJIT_NOINLINE void test_rrr_ops(JitContext& ctx) {
   test_rrr_op(ctx, UniOpRRR::kSBound, uint32_t(INT32_MAX), 0u, 0u);
   test_rrr_op(ctx, UniOpRRR::kSBound, uint32_t(INT32_MAX), 100000u, 100000u);
   test_rrr_op(ctx, UniOpRRR::kSBound, uint32_t(INT32_MAX), uint32_t(INT32_MAX), uint32_t(INT32_MAX));
+}
+
+// ujit::UniCompiler - Tests - RRR Operations - Aliased Sources
+// ===========================================================
+
+// `dst = op(x, x)`, which several emit_3i() paths special-case (`aIsB`) or hand
+// to an instruction that has to place one virtual register in two operand slots
+// - UDiv and UMod put src2 in the divisor slot while src1 occupies EAX. The
+// vectors above never pass the same register twice, so this is checked against a
+// reference instead of a table.
+static uint32_t rrr_same_src_ref(UniOpRRR op, uint32_t x) {
+  uint32_t sh = x & 31u;
+
+  switch (op) {
+    case UniOpRRR::kAnd: return x;
+    case UniOpRRR::kOr: return x;
+    case UniOpRRR::kXor: return 0u;
+    case UniOpRRR::kBic: return 0u;
+    case UniOpRRR::kAdd: return x + x;
+    case UniOpRRR::kSub: return 0u;
+    case UniOpRRR::kMul: return x * x;
+    case UniOpRRR::kUDiv: return 1u;
+    case UniOpRRR::kUMod: return 0u;
+    case UniOpRRR::kSMin: return x;
+    case UniOpRRR::kSMax: return x;
+    case UniOpRRR::kUMin: return x;
+    case UniOpRRR::kUMax: return x;
+    case UniOpRRR::kSll: return x << sh;
+    case UniOpRRR::kSrl: return x >> sh;
+    case UniOpRRR::kSra: return uint32_t(int32_t(x) >> sh);
+    case UniOpRRR::kRol: return sh ? (x << sh) | (x >> (32u - sh)) : x;
+    case UniOpRRR::kRor: return sh ? (x >> sh) | (x << (32u - sh)) : x;
+    case UniOpRRR::kSBound: return x;
+  }
+
+  return 0u;
+}
+
+// Builds `dst = op(a, a)`, with dst either distinct from `a` or `a` itself.
+static TestRRIFunc create_func_rrr_same_src(JitContext& ctx, UniOpRRR op, bool dst_is_src) {
+  ctx.prepare();
+
+  UniCompiler uc(&ctx.cc, ctx.features, ctx.cpu_hints);
+  uc.init_vec_width(VecWidth::k128);
+
+  FuncNode* node = uc.add_func(FuncSignature::build<uint32_t, uint32_t>());
+  EXPECT_NOT_NULL(node);
+
+  Gp a = uc.new_gp32("a");
+  node->set_arg(0, a);
+
+  Gp result = dst_is_src ? a : uc.new_gp32("result");
+
+  uc.emit_3i(op, result, a, a);
+  uc.ret(result);
+
+  uc.end_func();
+  return ctx.finish<TestRRIFunc>();
+}
+
+static ASMJIT_NOINLINE void test_rrr_same_src_op(JitContext& ctx, UniOpRRR op, uint32_t x) {
+  uint32_t expected = rrr_same_src_ref(op, x);
+
+  for (bool dst_is_src : { false, true }) {
+    TestRRIFunc fn = create_func_rrr_same_src(ctx, op, dst_is_src);
+    uint32_t observed = fn(x);
+    EXPECT_EQ(observed, expected)
+      .message("Operation failed (RRR, src1 == src2, %s):\n"
+              "         Input: %d\n"
+              "      Expected: %d\n"
+              "      Observed: %d\n"
+              "Assembly:\n%s",
+              dst_is_src ? "dst == src1 == src2" : "dst is distinct",
+              x,
+              expected,
+              observed,
+              ctx.logger_content());
+    ctx.rt.reset();
+  }
+}
+
+static ASMJIT_NOINLINE void test_rrr_same_src_ops(JitContext& ctx) {
+  static const uint32_t values[] = {
+    0u,
+    1u,
+    3u,
+    22u,
+    1000u,
+    0x11223344u,
+    0x7FFFFFFFu,
+    0x80000000u,
+    0xFFFFFF00u,
+    0xFFFFFFFFu
+  };
+
+  for (uint32_t i = 0; i <= uint32_t(UniOpRRR::kMaxValue); i++) {
+    UniOpRRR op = UniOpRRR(i);
+    for (uint32_t x : values) {
+      // x == 0 would be a genuine division by zero in the generated code.
+      if (x == 0u && (op == UniOpRRR::kUDiv || op == UniOpRRR::kUMod))
+        continue;
+      test_rrr_same_src_op(ctx, op, x);
+    }
+  }
 }
 
 // ujit::UniCompiler - Tests - SIMD - Functions
@@ -5493,6 +5611,7 @@ static void test_gp_ops(JitContext& ctx) {
   test_mr_ops(ctx);
   test_rr_ops(ctx);
   test_rrr_ops(ctx);
+  test_rrr_same_src_ops(ctx);
 }
 
 #if defined(ASMJIT_UJIT_X86)
