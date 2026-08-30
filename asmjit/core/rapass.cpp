@@ -1085,6 +1085,14 @@ static ASMJIT_INLINE Error BaseRAPass_calculateInOutKill(
       block->clear_flags(RABlockFlags::kIsEnqueued);
 
       for (RABlock* predecessor : block->predecessors()) {
+        // Only blocks in `_pov` get alloc_live_bits(), and remove_unreachable_code()
+        // strips an unreachable block's nodes while leaving its CFG edges in place. So a
+        // reachable block can still list an unreachable predecessor whose LIVE-IN span is
+        // empty, and reading it dereferences a null BitWord pointer.
+        if (!predecessor->is_reachable()) {
+          continue;
+        }
+
         Support::BitWord changed = BaseRAPass_recalculateInOut<BitMutator>(predecessor, multi_work_reg_count_as_bit_words, block);
         if (Support::bool_and(changed, !predecessor->is_enqueued())) {
           predecessor->add_flags(RABlockFlags::kIsEnqueued);
