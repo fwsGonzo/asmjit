@@ -674,9 +674,14 @@ void UniCompiler::emit_select(const Gp& dst, const Operand_& sel1_, const Operan
   Operand sel1(sel1_);
   Operand sel2(sel2_);
 
-  // Reverse the condition if we can place the immediate value first or if `dst == sel2`.
-  if ((!sel1.is_imm() && sel2.is_imm()) || (sel2.is_reg() && dst.id() == sel2.id())) {
-    ca.reverse();
+  bool dst_is_sel1 = sel1.is_reg() && dst.id() == sel1.id();
+  bool dst_is_sel2 = sel2.is_reg() && dst.id() == sel2.id();
+
+  // Swap the selected values if `dst == sel2`, so `dst` keeps its value, or if we can place the immediate value
+  // first, unless `dst == sel1` (the swap would then make `dst == sel2`, which `mov dst, sel1` would clobber).
+  // Swapping the values negates the condition - reversing it would only swap the operands of the comparison.
+  if (dst_is_sel2 || (!sel1.is_imm() && sel2.is_imm() && !dst_is_sel1)) {
+    ca.cond = x86::negate_cond(ca.cond);
     std::swap(sel1, sel2);
   }
 

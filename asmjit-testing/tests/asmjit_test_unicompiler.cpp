@@ -233,6 +233,39 @@ static TestCondRRFunc create_func_cond_rr(JitContext& ctx, UniOpCond op, CondCod
       uc.select(result, true_value, false_value, UniCondition(op, cond_code, a, b));
       break;
     }
+
+    // Select with the destination aliasing one of the selected values. emit_select() swaps the values in some of
+    // these shapes, which must negate the condition, and must not move into a destination that is still to be read.
+    case 3: {
+      // dst == sel2, sel1 is an immediate.
+      uc.mov(result, 0);
+      uc.select(result, Imm(1), result, UniCondition(op, cond_code, a, b));
+      break;
+    }
+
+    case 4: {
+      // dst == sel2, sel1 is a register.
+      Gp true_value = uc.new_gp32("true_value");
+      uc.mov(true_value, 1);
+      uc.mov(result, 0);
+      uc.select(result, true_value, result, UniCondition(op, cond_code, a, b));
+      break;
+    }
+
+    case 5: {
+      // dst == sel1, sel2 is a zero immediate.
+      uc.mov(result, 1);
+      uc.select(result, result, Imm(0), UniCondition(op, cond_code, a, b));
+      break;
+    }
+
+    case 6: {
+      // dst == sel1, sel2 is a non-zero immediate.
+      uc.mov(result, 1);
+      uc.select(result, result, Imm(2), UniCondition(op, cond_code, a, b));
+      uc.and_(result, result, Imm(1));
+      break;
+    }
   }
 
   uc.ret(result);
@@ -269,7 +302,7 @@ static TestCondRIFunc create_func_cond_ri(JitContext& ctx, UniOpCond op, CondCod
 // ===========================================================
 
 static ASMJIT_NOINLINE void test_conditional_op(JitContext& ctx, UniOpCond op, CondCode cond_code, int32_t a, int32_t b, bool expected) {
-  for (uint32_t variation = 0; variation < 3; variation++) {
+  for (uint32_t variation = 0; variation < 7; variation++) {
     TestCondRRFunc fn_rr = create_func_cond_rr(ctx, op, cond_code, variation);
     TestCondRIFunc fn_ri = create_func_cond_ri(ctx, op, cond_code, b);
 
